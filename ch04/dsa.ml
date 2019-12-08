@@ -1,0 +1,114 @@
+open Unsigned.UInt32
+
+let machine_word_size = 8
+
+module Byte = struct
+  include Bytes
+  let g_ b i = Char.code (get b i)
+  let s_ b i v = set b i (Char.chr v)
+  let print_byte b = 
+    let char_seq = Bytes.to_seq b in
+    Seq.iter (fun c -> Printf.printf "%.2x" (Char.code c)) char_seq;
+    Printf.printf "\n"
+end
+
+type dsa_params = {
+  g: Z.t;
+  p: Z.t;
+  q: Z.t;
+}
+
+type dsa_signature = {
+  r: Z.t;
+  s: Z.t;
+}
+
+let load_huge (message: bytes) : Z.t = Z.of_bits (Bytes.to_string message)
+let size (n: Z.t) = (Z.size n) * machine_word_size
+
+let generate_message_secret (params: dsa_params) : Z.t =
+  let k_size = size params.q + 8 in
+  let k_byte = Byte.create k_size in
+  (* this should be filled with random bytes *)
+  for i = 0 to k_size - 1 do
+    Byte.s_ k_byte i (i + 1)
+  done;
+  let k_0 = load_huge k_byte in
+  Z.add (Z.erem k_0 (Z.sub params.q Z.one)) Z.one
+
+let dsa_sign (params: dsa_params) (private_key: Z.t) (hash: t array) (hash_len: int) (signature: dsa_signature ref) : unit =
+  let z = ref Z.zero in
+  let k = ref (generate_message_secret params) in
+  (* r = (g ^ k % p ) % q *)
+  signature := { r = Z.erem (Z.powm params.g !k params.p) params.q; s = !signature.s };
+  let q_size = size params.q in
+  z := load_huge (Digest.(hash_to_bytes hash (if (hash_len * 4) < q_size then hash_len else q_size / 4) Big));
+  (* s = (inv(k) * (z + xr)) % q *)
+  k := Z.invert !k params.q;
+  signature := { r = !signature.r; s = Z.erem (Z.mul !k (Z.add (Z.mul private_key !signature.r) !z)) params.q }
+
+let dsa_verify (params: dsa_params) (public_key: Z.t) (hash: t array) (hash_len: int) (signature: dsa_signature) : bool =
+  let q_size = size params.q in
+  let w = Z.invert signature.s params.q in
+  let z = load_huge (Digest.(hash_to_bytes hash (if (hash_len * 4) < q_size then hash_len else q_size / 4) Big)) in
+  let u1 = Z.erem (Z.mul z w) params.q in
+  let u2 = Z.erem (Z.mul signature.r w) params.q in
+  let v = Z.erem (Z.erem (Z.mul (Z.powm params.g u1 params.p) (Z.powm public_key u2 params.p)) params.p) params.q in
+  Z.equal v signature.r
+
+
+let priv_list = [
+    0x53; 0x61; 0xae; 0x4f; 0x6f; 0x25; 0x98; 0xde; 0xc4; 0xbf; 0x0b; 0xbe; 0x09;
+    0x5f; 0xdf;  0x90; 0x2f; 0x4c; 0x8e; 0x09 ]
+
+let pub_list = [
+  0x1b; 0x91; 0x4c; 0xa9; 0x73; 0xdc; 0x06; 0x0d; 0x21; 0xc6; 0xff; 0xab; 0xf6;
+  0xad; 0xf4; 0x11; 0x97; 0xaf; 0x23; 0x48; 0x50; 0xa8; 0xf3; 0xdb; 0x2e; 0xe6;
+  0x27; 0x8c; 0x40; 0x4c; 0xb3; 0xc8; 0xfe; 0x79; 0x7e; 0x89; 0x48; 0x90; 0x27;
+  0x92; 0x6f; 0x5b; 0xc5; 0xe6; 0x8f; 0x91; 0x4c; 0xe9; 0x4f; 0xed; 0x0d; 0x3c;
+  0x17; 0x09; 0xeb; 0x97; 0xac; 0x29; 0x77; 0xd5;  0x19; 0xe7; 0x4d; 0x17 ]
+  
+let p_list = [
+  0x9c; 0x4c; 0xaa; 0x76; 0x31; 0x2e; 0x71; 0x4d; 0x31; 0xd6; 0xe4; 0xd7;
+  0xe9; 0xa7; 0x29; 0x7b; 0x7f; 0x05; 0xee; 0xfd; 0xca; 0x35; 0x14; 0x1e; 0x9f;
+  0xe5; 0xc0; 0x2a; 0xe0; 0x12; 0xd9; 0xc4; 0xc0; 0xde; 0xcc; 0x66; 0x96; 0x2f;
+  0xf1; 0x8f; 0x1a; 0xe1; 0xe8; 0xbf; 0xc2; 0x29; 0x0d; 0x27; 0x07; 0x48; 0xb9;
+  0x71; 0x04; 0xec; 0xc7; 0xf4; 0x16; 0x2e; 0x50; 0x8d; 0x67; 0x14; 0x84; 0x7b ]
+
+let q_list = [
+  0xac; 0x6f; 0xc1; 0x37; 0xef; 0x16; 0x74; 0x52; 0x6a; 0xeb; 0xc5; 0xf8;
+  0xf2; 0x1f; 0x53; 0xf4; 0x0f; 0xe0; 0x51; 0x5f ]
+
+let g_list = [
+  0x7d; 0xcd; 0x66; 0x81; 0x61; 0x52; 0x21; 0x10; 0xf7; 0xa0; 0x83; 0x4c; 0x5f;
+  0xc8; 0x84;  0xca; 0xe8; 0x8a; 0x9b; 0x9f; 0x19; 0x14; 0x8c; 0x7d; 0xd0; 0xee;
+  0x33; 0xce; 0xb4; 0x57;  0x2d; 0x5e; 0x78; 0x3f; 0x06; 0xd7; 0xb3; 0xd6; 0x40;
+  0x70; 0x2e; 0xb6; 0x12; 0x3f; 0x4a;  0x61; 0x38; 0xae; 0x72; 0x12; 0xfb; 0x77; 
+  0xde; 0x53; 0xb3; 0xa1; 0x99; 0xd8; 0xa8; 0x19;  0x96; 0xf7; 0x7f; 0x99 ]
+
+let list_to_z val_list =
+  let test_byte = Byte.create (List.length val_list) in
+  let rev_list = List.rev val_list in
+  List.iteri (fun i ch -> Byte.set test_byte i (Char.chr ch)) rev_list;
+  Z.of_bits (Byte.to_string test_byte)
+
+  (*
+let () =
+  let priv = list_to_z priv_list in
+  let pub = list_to_z pub_list in
+  let p = list_to_z p_list in
+  let q = list_to_z q_list in
+  let g = list_to_z g_list in
+  let msg = Byte.of_string "abc123" in
+  let params = { p = p; q = q; g = g } in
+  let signature = ref { r = Z.zero; s = Z.zero } in
+  let digest = ref Digest.new_sha1_digest in
+  digest := Digest.update_digest !digest msg (Byte.length msg);
+  digest := Digest.finalize_digest !digest;
+  dsa_sign params priv !digest.hash !digest.hash_len signature;
+  Byte.print_byte (Byte.of_string (Z.to_bits !signature.r));
+  Byte.print_byte (Byte.of_string (Z.to_bits !signature.s));
+  if (dsa_verify params pub !digest.hash !digest.hash_len !signature) then
+    print_string "verified ..\n" 
+  else print_string "wrong sig ..\n"
+  *)
